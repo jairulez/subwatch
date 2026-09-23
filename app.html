@@ -154,101 +154,209 @@ async function api(path, opts){
   return r.status===204 ? null : r.json();
 }
 
-// ===== Gmail receipt scanning =====
-const RECEIPT_Q = '(subject:receipt OR subject:invoice OR subject:"payment successful" OR subject:"payment receipt" OR subject:subscription OR subject:renewal OR subject:"auto-debit" OR subject:"order confirmation" OR subject:"your plan") newer_than:400d -category:promotions';
-const KNOWN = ["netflix","spotify","amazon","prime","youtube","google","openai","chatgpt","anthropic","microsoft","apple","icloud","adobe","canva","notion","figma","github","linkedin","hotstar","disney","zee5","sonyliv","jiocinema","jio","airtel","spotify","swiggy","zomato","uber","ola","cred","phonepe","gpay","googlepay","paytm","razorpay","x.com","twitter","medium","discord","dropbox","zoom","slack","hostinger","godaddy","namecheap","cloudflare","digitalocean","aws","vercel","heroku","shopify","grammarly","duolingo","audible","kindle","coursera","udemy","byju","unacademy","spotify","wynk","gaana","apple music","novi","cursor","perplexity","gemini","claude","midjourney","elevenlabs","runway","octafx","octa","zerodha","groww","upstox","tradingview","truecaller","spotify"];
-const AMT_RE = /(?:₹|rs\.?|inr)\s?([0-9][0-9,]*(?:\.[0-9]{1,2})?)|([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s?(?:₹|rs\.?|inr)|(?:\$|usd)\s?([0-9][0-9,]*(?:\.[0-9]{1,2})?)|([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s?(?:\$|usd)/i;
+// ===== Gmail receipt scanning (v2) =====
+const RECEIPT_Q = '(subject:receipt OR subject:invoice OR subject:"payment successful" OR subject:"payment receipt" OR subject:subscription OR subject:renewal OR subject:renew OR subject:"auto-debit" OR subject:"your plan" OR subject:"payment declined" OR subject:"bill for" OR subject:premium OR subject:membership OR "auto-renewing subscription" OR from:googleplay-noreply@google.com OR from:no_reply@email.apple.com) newer_than:400d -category:promotions -subject:IPO -subject:SIP';
+const AGGREGATORS = ["google.com","razorpay.com","cashfreemail.com","cashfree.com","paytm.com","phonepe.com","apple.com","email.apple.com","payu.in","instamojo.com","stripe.com","paypal.com"];
+const NUM = "([0-9][0-9,]*(?:\\.[0-9]{1,2})?)";
+const CUR = "(₹|\\brs\\.?|\\binr\\b|\\$|\\busd\\b)";
+const AMT_RE = new RegExp(CUR+"\\s?"+NUM+"|"+NUM+"\\s?(₹|\\brs\\b\\.?|\\binr\\b|\\busd\\b)","i");
+const LABELLED_RE = new RegExp("(?:total|amount paid|amount due|amount|payment of|charged|you paid|paid|price)\\s*:?\\s*"+CUR+"\\s?"+NUM,"i");
+const THEN_RE = new RegExp("then\\s+"+CUR+"\\s?"+NUM+"\\s*/\\s*(month|year|week)\\s+starting\\s+([A-Z][a-z]{2,8}\\.? \\d{1,2}, \\d{4})","i");
+const RENEW_RE = /renew(?:s|al)?\s+(?:on|date:?)\s+([A-Z][a-z]{2,8}\.? \d{1,2}, \d{4})/i;
+const MONTHS = {jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
 
-function cleanName(from){
-  let n = (from||"").replace(/<[^>]*>/g,"").replace(/"/g,"").trim();
-  n = n.replace(/\s*(team|support|billing|payments|no-?reply|india|inc\.?|ltd\.?|pvt\.?)\s*/gi," ").replace(/\s+/g," ").trim();
-  return n || (from||"Unknown").split("@")[0];
+function decodeEntities(s){
+  return String(s||"").replace(/&#(\d+);/g,(m,n)=>String.fromCodePoint(+n)).replace(/&#x([0-9a-f]+);/gi,(m,n)=>String.fromCodePoint(parseInt(n,16)))
+    .replace(/&nbsp;/g," ").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;|&apos;/g,"'").replace(/&rupee;|&inr;/gi,"₹");
 }
-function domainOf(from){ const m=(from||"").match(/@([A-Za-z0-9.-]+)/); return m?m[1].toLowerCase():""; }
+function b64utf8(data){
+  try{
+    const bin = atob(data.replace(/-/g,"+").replace(/_/g,"/"));
+    const bytes = Uint8Array.from(bin, c=>c.charCodeAt(0));
+    return new TextDecoder("utf-8").decode(bytes);
+  }catch(e){ return ""; }
+}
+function htmlToText(h){
+  return decodeEntities(String(h||"").replace(/<(style|script|head|title)[^>]*>[\s\S]*?<\/\1>/gi," ").replace(/<!--[\s\S]*?-->/g," ").replace(/<br\s*\/?>|<\/(p|div|tr|td|li|h\d)>/gi,"\n").replace(/<[^>]+>/g," "));
+}
+function collectParts(payload, out){
+  if(!payload) return out;
+  if(payload.parts && payload.parts.length){ payload.parts.forEach(p=>collectParts(p,out)); return out; }
+  if(payload.body && payload.body.data){
+    const mt=(payload.mimeType||"").toLowerCase();
+    if(mt==="text/plain") out.plain.push(b64utf8(payload.body.data));
+    else if(mt==="text/html") out.html.push(b64utf8(payload.body.data));
+  }
+  return out;
+}
+function extractText(payload){
+  const p = collectParts(payload,{plain:[],html:[]});
+  const plain = p.plain.join("\n").trim();
+  const txt = plain.length>40 ? plain : htmlToText(p.html.join("\n"));
+  return txt.replace(/[ \t\u00a0\u200b-\u200f\u034f\ufeff]+/g," ").replace(/\n\s*\n+/g,"\n");
+}
+function toAmt(cur,num){
+  const v=parseFloat(String(num||"").replace(/,/g,""));
+  if(!isFinite(v)||v<=0||v>2000000) return null;
+  const c=String(cur||"").toLowerCase().replace(/\./,"");
+  return {amount:v, currency:(c==="$"||c==="usd")?"USD":"INR"};
+}
 function findAmount(text){
   if(!text) return null;
-  const m = text.match(AMT_RE);
+  let m = text.match(LABELLED_RE);
+  if(m){ const a=toAmt(m[1],m[2]); if(a) return a; }
+  m = text.match(AMT_RE);
   if(!m) return null;
-  const inr = m[1]||m[2], usd = m[3]||m[4];
-  const val = parseFloat((inr||usd||"").replace(/,/g,""));
-  if(!isFinite(val)||val<=0||val>2000000) return null;
-  return {amount:val, currency: inr?"INR":"USD"};
+  return m[1] ? toAmt(m[1],m[2]) : toAmt(m[4],m[3]);
 }
+function parseDate(s){
+  const m=String(s||"").match(/([A-Za-z]{3})[a-z]*\.? (\d{1,2}), (\d{4})/);
+  if(!m || MONTHS[m[1].toLowerCase()]===undefined) return null;
+  const d=new Date(+m[3], MONTHS[m[1].toLowerCase()], +m[2]);
+  return isNaN(d)?null:d;
+}
+function ymd(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
 function guessCycle(text){
   const t=(text||"").toLowerCase();
-  if(/annual|yearly|12.month|1 year/.test(t)) return "yearly";
-  if(/quarterly|3.month/.test(t)) return "quarterly";
-  if(/weekly|7.day/.test(t)) return "weekly";
-  if(/monthly|per month|\/mo\b|1.month/.test(t)) return "monthly";
+  if(/\/\s?(month|mo)\b|per month|a month\b|monthly|every month/.test(t)) return "monthly";
+  if(/\/\s?(year|yr)\b|per year|annual|yearly|every year|12 months plan/.test(t)) return "yearly";
+  if(/quarterly|every 3 months|\/\s?quarter/.test(t)) return "quarterly";
+  if(/\/\s?week\b|weekly|every week/.test(t)) return "weekly";
   return null;
 }
-function looksRelevant(msg){
-  const f=(msg.from||"").toLowerCase(), s=(msg.subject||"").toLowerCase();
-  return KNOWN.some(k=>f.includes(k)||s.includes(k));
+function msgStatus(text){
+  const t=(text||"").toLowerCase();
+  if(/suspended|payment declined|payment (?:has )?failed|update payment|couldn.t process|could not process|payment issue/.test(t)) return "failing";
+  if(/(?:will be|has been) cancel+ed on|(?:you have|you've|has been|have been|is now) cancel+ed|subscription cancel+ed|cancel+ation confirmed/.test(t)) return "cancelled";
+  return "paid";
+}
+function receiptish(text){
+  return /receipt|invoice|payment (?:successful|received|confirmed|confirmation)|paid successfully|amount paid|you paid|we charged|has been charged|charged to|debited|renewed|subscription purchase|thank you for (?:your )?(?:payment|purchase)|received a payment/i.test(text||"");
+}
+function notASubscription(text){
+  return /credit card bill|card bill|minimum due|\bipo\b|\breit\b|\bsip\b|mutual fund|\bloan\b|\bemi\b|outstanding dues|gst invoice/i.test(text||"");
+}
+function subscriptionish(text){
+  return /auto-?renew|subscription|renews?\b|renewal|\/\s?month|per month|monthly|premium receipt|bill payment|membership|recurring|mandate|autopay|auto-debit/i.test(text||"");
+}
+function cleanName(from){
+  let n = (from||"").replace(/<[^>]*>/g,"").replace(/"/g,"").trim();
+  n = n.replace(/\s*\b(team|support|billing|payments|no-?reply|india|inc\.?|ltd\.?|pvt\.?)\b\s*/gi," ").replace(/\s+/g," ").trim();
+  if(!n || n.includes("@")){ const d=domainOf(from).split("."); n=(d.length>1?d[d.length-2]:d[0])||"Unknown"; n=n.charAt(0).toUpperCase()+n.slice(1); }
+  return n;
+}
+function domainOf(from){ const m=(from||"").match(/@([A-Za-z0-9.-]+)/); return m?m[1].toLowerCase():""; }
+function baseDomain(d){ const p=d.split("."); return p.length>2 && !/^(co|com|net|org|bank)$/.test(p[p.length-2]) ? p.slice(-2).join(".") : (p.length>2?p.slice(-3).join("."):d); }
+function merchantOf(rec, body){
+  const dom = domainOf(rec.from), s = rec.subject;
+  if(/googleplay|google\.com$/.test(dom) && /play/i.test(rec.from+" "+body.slice(0,80))){
+    let m = body.match(/Item\s+Price\s+([^\n]*?)\s*(?:₹|Rs\.?|\$|INR|USD)\s?\d/i);
+    if(m){
+      const groups=[...m[1].matchAll(/\(([^()]+)\)/g)].map(g=>g[1]).filter(g=>!/^by\s/i.test(g));
+      if(groups.length) return groups[0];
+      return m[1].trim();
+    }
+    m = s.match(/^(?:payment declined for |your )?(.+?) subscription/i);
+    if(m) return m[1];
+    m = body.match(/purchase from (.+?) on Google\s+Play/i);
+    if(m) return m[1];
+    return "Google Play";
+  }
+  if(/razorpay/.test(dom)){
+    let m = s.match(/payment successful for (.+)$/i) || s.match(/transaction on (.+)$/i);
+    const sn = rec.snippet.match(/^(.+?)\s*₹/);
+    if(sn) return sn[1].trim();
+    if(m) return m[1].trim();
+  }
+  if(/cashfree/.test(dom)){
+    const m = s.match(/^(.+?)\s+-\s+payment successful/i); if(m) return m[1].trim();
+  }
+  if(/apple\.com/.test(dom)){
+    const m = body.match(/\n([^\n]{2,60})\n[^\n]*(?:monthly|yearly|renews)/i); if(m) return m[1].trim();
+  }
+  return cleanName(rec.from);
+}
+function keyOf(name, dom){
+  const n = name.toLowerCase().split(":")[0].replace(/[^a-z0-9 ]/g,"").trim();
+  return AGGREGATORS.some(a=>dom===a||dom.endsWith("."+a)) ? "m:"+n : baseDomain(dom)||("m:"+n);
 }
 
 async function scanGmail(onProgress){
   const found = {};
   let pageToken = null, scanned = 0;
   do{
-    const q = RECEIPT_Q + (pageToken? "&pageToken="+pageToken : "");
     const list = await api("https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=100&q="+encodeURIComponent(RECEIPT_Q)+(pageToken?"&pageToken="+pageToken:""));
     const ids = (list.messages||[]).map(m=>m.id);
     for(const id of ids){
-      const meta = await api("https://gmail.googleapis.com/gmail/v1/users/me/messages/"+id+"?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date");
-      const h = {}; (meta.payload&&meta.payload.headers||[]).forEach(x=>h[x.name]=x.value);
-      const rec = {id:id, subject:h.Subject||"", from:h.From||"", date:h.Date||"", snippet:meta.snippet||""};
+      let full; try{ full = await api("https://gmail.googleapis.com/gmail/v1/users/me/messages/"+id+"?format=full"); }catch(e){ continue; }
+      const h = {}; (full.payload&&full.payload.headers||[]).forEach(x=>h[x.name.toLowerCase()]=x.value);
+      const rec = {id:id, subject:decodeEntities(h.subject||""), from:h.from||"", snippet:decodeEntities(full.snippet||"")};
       scanned++;
-      if(scanned%10===0) onProgress("Scanned "+scanned+" receipts...");
-      const dom = domainOf(rec.from);
-      if(state.ignored.includes(dom)) continue;
-      let amt = findAmount(rec.snippet) || findAmount(rec.subject);
-      let bodyText = rec.snippet;
-      if(!amt && looksRelevant(rec)){
-        try{
-          const full = await api("https://gmail.googleapis.com/gmail/v1/users/me/messages/"+id+"?format=full");
-          bodyText = extractText(full.payload).slice(0,4000);
-          amt = findAmount(bodyText);
-        }catch(e){}
-      }
-      if(!amt) continue;
-      const cycle = guessCycle(rec.subject+" "+bodyText);
-      const when = rec.date ? new Date(rec.date) : null;
+      if(scanned%10===0) onProgress("Scanned "+scanned+" emails...");
+      const when = full.internalDate ? new Date(+full.internalDate) : (h.date ? new Date(h.date) : null);
       if(!when || isNaN(when)) continue;
-      const key = dom || rec.from;
-      if(!found[key]) found[key] = {name:cleanName(rec.from), domain:dom, receipts:[], currency:amt.currency};
-      found[key].receipts.push({date:when, amount:amt.amount, cycle:cycle});
+      const body = extractText(full.payload).slice(0,8000);
+      const text = rec.subject+"\n"+rec.snippet+"\n"+body;
+      const amt = findAmount(rec.snippet+"\n"+body) || findAmount(rec.subject);
+      const head = rec.subject+"\n"+rec.snippet+"\n"+body.slice(0,1500);
+      const status = msgStatus(rec.subject+" "+body.slice(0,600));
+      if(notASubscription(rec.subject+" "+rec.snippet)) continue;
+      if(status==="paid" && (!amt || !receiptish(head))) continue;
+      const dom = domainOf(rec.from);
+      const name = merchantOf(rec, body);
+      const key = keyOf(name, dom);
+      if(state.ignored.includes(key) || state.ignored.includes(dom)) continue;
+      const then = text.match(THEN_RE);
+      const renew = text.match(RENEW_RE);
+      if(!found[key]) found[key] = {name:name, domain:dom, events:[], subish:false};
+      const f = found[key];
+      if(subscriptionish(head)) f.subish = true;
+      f.events.push({date:when, status:status, amount:amt?amt.amount:null, currency:amt?amt.currency:null, cycle:guessCycle(text),
+        then: then ? {amount:parseFloat(then[2].replace(/,/g,"")), cycle:then[3].toLowerCase()==="year"?"yearly":then[3].toLowerCase()==="week"?"weekly":"monthly", from:parseDate(then[4])} : null,
+        renewOn: renew ? parseDate(renew[1]) : null});
     }
     pageToken = list.nextPageToken;
-    if(scanned>=300) break;
+    if(scanned>=400) break;
   }while(pageToken);
-
-  const out = [];
+  return buildSubs(found);
+}
+function buildSubs(found){
+  const out = [], today = new Date(); today.setHours(0,0,0,0);
   for(const key of Object.keys(found)){
     const f = found[key];
-    f.receipts.sort((a,b)=>a.date-b.date);
-    const last = f.receipts[f.receipts.length-1];
-    let cycle = last.cycle;
-    if(!cycle && f.receipts.length>=2){
-      const gap = (f.receipts[f.receipts.length-1].date - f.receipts[f.receipts.length-2].date)/86400000;
-      if(gap>300) cycle="yearly"; else if(gap>75) cycle="quarterly"; else if(gap>12) cycle="monthly"; else cycle="weekly";
+    f.events.sort((a,b)=>a.date-b.date);
+    // same receipt mailed twice (e.g. merchant + gateway copy) - keep one per day+amount
+    const paid = []; f.events.filter(e=>e.status==="paid"&&e.amount).forEach(e=>{ if(!paid.some(p=>p.amount===e.amount && Math.abs(p.date-e.date)<36e5*24)) paid.push(e); });
+    const lastEv = f.events[f.events.length-1];
+    const withAmt = f.events.filter(e=>e.amount);
+    if(!withAmt.length) continue;
+    // recurring evidence: explicit subscription wording, or 2+ similar payments 20-400 days apart
+    let pattern=false;
+    for(let i=1;i<paid.length;i++){ const g=(paid[i].date-paid[i-1].date)/864e5; if(g>=20&&g<=400&&Math.abs(paid[i].amount-paid[i-1].amount)<=0.15*paid[i-1].amount) pattern=true; }
+    if(!f.subish && !pattern) continue;
+    const last = paid.length ? paid[paid.length-1] : withAmt[withAmt.length-1];
+    let cycle = [...f.events].reverse().map(e=>e.cycle).find(Boolean) || null;
+    if(!cycle && paid.length>=2){
+      const gap = (paid[paid.length-1].date - paid[paid.length-2].date)/864e5;
+      cycle = gap>300?"yearly":gap>75?"quarterly":gap>=20?"monthly":null;
     }
     if(!cycle) cycle = "monthly";
-    const next = addDays(last.date.toISOString().slice(0,10), CYCLE_DAYS[cycle]);
-    out.push({id:uid(), source:"auto", key:key, name:f.name, amount:last.amount, currency:f.currency, cycle:cycle, nextRenewal:next, lastPaid:last.date.toISOString().slice(0,10), reminderEventId:null});
+    let status = lastEv.status==="paid" ? "active" : lastEv.status;
+    let next = null;
+    const renewEv = [...f.events].reverse().find(e=>e.renewOn);
+    if(renewEv && renewEv.date>=last.date && renewEv.renewOn>=today) next = renewEv.renewOn;
+    if(!next){ next = new Date(last.date); next.setHours(0,0,0,0); next.setDate(next.getDate()+CYCLE_DAYS[cycle]); }
+    if(status==="active" && next < new Date(today.getTime()-15*864e5)) status = "lapsed";
+    let note = "";
+    const thenEv = [...f.events].reverse().find(e=>e.then);
+    if(thenEv && thenEv.then.from && thenEv.then.from>=today) note = "Price goes to "+fmtAmt(thenEv.then.amount,last.currency)+" from "+ymd(thenEv.then.from);
+    else if(paid.length>=2 && last.amount>paid[paid.length-2].amount*1.05) note = "Price up from "+fmtAmt(paid[paid.length-2].amount,last.currency);
+    if(status==="failing") note = (note?note+" · ":"")+"Payment failing - update payment or it gets cancelled";
+    if(status==="cancelled") note = (note?note+" · ":"")+"Cancelled";
+    if(status==="lapsed") note = (note?note+" · ":"")+"No payment seen for a while - may have lapsed";
+    out.push({id:uid(), source:"auto", key:key, name:f.name, amount:last.amount, currency:last.currency||"INR", cycle:cycle, nextRenewal:ymd(next), lastPaid:paid.length?ymd(last.date):null, status:status, note:note, reminderEventId:null});
   }
   return out;
-}
-function extractText(payload){
-  if(!payload) return "";
-  if(payload.body && payload.body.data){ try{ return atob(payload.body.data.replace(/-/g,"+").replace(/_/g,"/")); }catch(e){ return ""; } }
-  let txt = "";
-  (payload.parts||[]).forEach(p=>{
-    if(p.mimeType==="text/plain") txt += extractText(p)+" ";
-  });
-  if(!txt) (payload.parts||[]).forEach(p=>{ if(p.mimeType==="text/html") txt += extractText(p).replace(/<[^>]+>/g," ")+" "; });
-  if(!txt) (payload.parts||[]).forEach(p=>{ txt += extractText(p)+" "; });
-  return txt;
 }
 
 // ===== Calendar reminders =====
@@ -271,24 +379,28 @@ async function clearReminder(sub){
 // ===== UI =====
 function render(){
   const list = document.getElementById("subList");
-  const subs = state.subs.slice().sort((a,b)=>daysUntil(a.nextRenewal)-daysUntil(b.nextRenewal));
+  const rank = s=>(!s.status||s.status==="active")?0:(s.status==="failing"?1:2);
+  const subs = state.subs.slice().sort((a,b)=>rank(a)-rank(b) || daysUntil(a.nextRenewal)-daysUntil(b.nextRenewal));
   let inr=0, usd=0;
-  subs.forEach(s=>{ const m=monthlyEquiv(s); if(s.currency==="INR") inr+=m; else if(s.currency==="USD") usd+=m; });
+  const live = subs.filter(s=>!s.status||s.status==="active");
+  live.forEach(s=>{ const m=monthlyEquiv(s); if(s.currency==="INR") inr+=m; else if(s.currency==="USD") usd+=m; });
   document.getElementById("burnInr").textContent = "₹"+Math.round(inr).toLocaleString("en-IN");
   document.getElementById("burnUsd").textContent = "$"+usd.toFixed(2);
-  document.getElementById("burnCount").textContent = subs.length;
+  document.getElementById("burnCount").textContent = live.length;
   list.innerHTML = "";
   if(!subs.length){ list.innerHTML = '<div class="note" style="margin-top:10px">No subscriptions yet. Rescan Gmail or add one manually.</div>'; return; }
   subs.forEach(s=>{
     const d = daysUntil(s.nextRenewal);
-    const cls = d<0?"late":(d<=7?"soon":"far");
-    const when = d<0 ? Math.abs(d)+"d overdue" : (d===0?"today":(d===1?"tomorrow":"in "+d+"d"));
+    const inactive = s.status && s.status!=="active";
+    const cls = (d<0||s.status==="failing")?"late":(d<=7?"soon":"far");
+    const when = s.status==="cancelled" ? "cancelled" : s.status==="failing" ? "payment failing" : s.status==="lapsed" ? "lapsed?" : (d<0 ? Math.abs(d)+"d overdue" : (d===0?"today":(d===1?"tomorrow":"in "+d+"d")));
     const div = document.createElement("div");
     div.className="subitem";
     div.innerHTML =
       '<div class="row"><div><span class="name">'+esc(s.name)+'</span><span class="pill '+(s.source==="auto"?"auto":"man")+'">'+(s.source==="auto"?"Gmail":"manual")+'</span></div>'+
       '<div class="days '+cls+'">'+when+'</div></div>'+
       '<div class="meta">'+fmtAmt(s.amount,s.currency)+' / '+s.cycle+' · next '+s.nextRenewal+(s.lastPaid?' · last paid '+s.lastPaid:'')+'</div>'+
+      (s.note?'<div class="meta" style="color:'+(s.status&&s.status!=="active"?'#b45309':'inherit')+'">'+esc(s.note)+'</div>':'')+
       '<div class="actions">'+
         (s.reminderEventId
           ? '<button class="btn small ghost" data-act="unremind">Reminder on ✓</button>'
@@ -334,7 +446,7 @@ document.getElementById("signinBtn").addEventListener("click", async ()=>{
     const keptAuto = state.subs.filter(s=>s.source==="auto" && found.some(f=>f.key===s.key));
     for(const f of found){
       const ex = keptAuto.find(k=>k.key===f.key);
-      if(ex){ f.id=ex.id; f.reminderEventId=ex.reminderEventId; if(ex.nameOverride) f.name=ex.nameOverride; }
+      if(ex){ f.id=ex.id; f.reminderEventId=ex.reminderEventId; if(ex.nameOverride){ f.name=ex.nameOverride; f.nameOverride=ex.nameOverride; } }
     }
     state.subs = manual.concat(found);
     save();
@@ -352,7 +464,7 @@ document.getElementById("rescanBtn").addEventListener("click", async ()=>{
     const manual = state.subs.filter(s=>s.source==="manual");
     for(const f of found){
       const ex = state.subs.find(k=>k.source==="auto"&&k.key===f.key);
-      if(ex){ f.id=ex.id; f.reminderEventId=ex.reminderEventId; }
+      if(ex){ f.id=ex.id; f.reminderEventId=ex.reminderEventId; if(ex.nameOverride){ f.name=ex.nameOverride; f.nameOverride=ex.nameOverride; } }
     }
     state.subs = manual.concat(found); save(); render();
   }catch(e){ alert(e.message); }
