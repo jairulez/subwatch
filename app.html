@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SubWatch - subscription watchdog</title>
+<style>
+:root{--bg:#0f1115;--card:#1a1e26;--line:#2a303c;--txt:#e8eaf0;--dim:#9aa3b2;--acc:#4f8cff;--warn:#ffb454;--bad:#ff6b6b;--ok:#4ade80}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--txt);min-height:100vh}
+.wrap{max-width:680px;margin:0 auto;padding:20px 16px 80px}
+h1{font-size:22px;font-weight:700}
+h1 span{color:var(--acc)}
+.sub{color:var(--dim);font-size:13px;margin-top:4px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-top:16px}
+.btn{display:inline-block;background:var(--acc);color:#fff;border:none;border-radius:10px;padding:11px 18px;font-size:15px;font-weight:600;cursor:pointer}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.ghost{background:transparent;border:1px solid var(--line);color:var(--txt)}
+.btn.small{padding:6px 12px;font-size:13px;border-radius:8px}
+.row{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.burn{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px}
+.burn div{flex:1;min-width:110px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.burn .n{font-size:20px;font-weight:700}
+.burn .l{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+.subitem{border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px;background:var(--bg)}
+.subitem .name{font-weight:600;font-size:15px}
+.subitem .meta{color:var(--dim);font-size:13px;margin-top:2px}
+.pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:99px;margin-left:6px;vertical-align:middle}
+.pill.auto{background:#123; color:#7db4ff;border:1px solid #2a4a77}
+.pill.man{background:#13251a;color:#7ddba0;border:1px solid #2a5a3d}
+.days{font-weight:700;font-size:13px}
+.days.soon{color:var(--warn)}.days.late{color:var(--bad)}.days.far{color:var(--ok)}
+.actions{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}
+input,select{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:9px 10px;font-size:14px;margin-top:6px}
+label{font-size:12px;color:var(--dim);display:block;margin-top:10px}
+.frmrow{display:flex;gap:10px}.frmrow>div{flex:1}
+.note{font-size:12px;color:var(--dim);margin-top:8px;line-height:1.5}
+.hidden{display:none}
+#status{font-size:13px;color:var(--dim);margin-top:10px;white-space:pre-wrap}
+.err{color:var(--bad)}
+a{color:var(--acc)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Sub<span>Watch</span></h1>
+  <div class="sub">Finds your subscriptions from Gmail receipts, warns you before renewals. Everything stays in your browser and your Google account.</div>
+
+  <div class="card" id="signinCard">
+    <div class="row">
+      <div>
+        <div style="font-weight:600">Connect your Google account</div>
+        <div class="note">Read-only Gmail access to find receipts. Calendar access only if you set a reminder. Nothing is uploaded anywhere else.</div>
+      </div>
+      <button class="btn" id="signinBtn">Sign in</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="card">
+      <div class="row">
+        <div style="font-weight:600">Monthly burn</div>
+        <div>
+          <button class="btn small ghost" id="rescanBtn">Rescan Gmail</button>
+          <button class="btn small ghost" id="signoutBtn">Sign out</button>
+        </div>
+      </div>
+      <div class="burn">
+        <div><div class="n" id="burnInr">-</div><div class="l">INR / month</div></div>
+        <div><div class="n" id="burnUsd">-</div><div class="l">USD / month</div></div>
+        <div><div class="n" id="burnCount">-</div><div class="l">Active subs</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <div style="font-weight:600">Your subscriptions</div>
+        <button class="btn small" id="addBtn">+ Add manually</button>
+      </div>
+      <div id="subList"></div>
+    </div>
+
+    <div class="card hidden" id="formCard">
+      <div style="font-weight:600" id="formTitle">Add a subscription</div>
+      <label>Name</label><input id="fName" placeholder="Netflix">
+      <div class="frmrow">
+        <div><label>Amount</label><input id="fAmount" type="number" min="0" step="0.01" placeholder="199"></div>
+        <div><label>Currency</label><select id="fCurrency"><option value="INR">INR ₹</option><option value="USD">USD $</option><option value="EUR">EUR €</option><option value="GBP">GBP £</option></select></div>
+      </div>
+      <div class="frmrow">
+        <div><label>Billing cycle</label><select id="fCycle"><option value="monthly">Monthly</option><option value="yearly">Yearly</option><option value="weekly">Weekly</option><option value="quarterly">Quarterly</option></select></div>
+        <div><label>Next renewal date</label><input id="fDate" type="date"></div>
+      </div>
+      <div class="actions">
+        <button class="btn small" id="saveBtn">Save</button>
+        <button class="btn small ghost" id="cancelBtn">Cancel</button>
+      </div>
+      <div class="note" id="formNote"></div>
+    </div>
+
+    <div class="note" style="margin-top:18px">
+      Data lives in this browser's local storage only. "Remind me" creates an event on your own Google Calendar 3 days before renewal, with an email + popup reminder from Google. To stop reminders, delete the calendar event or remove it here.
+    </div>
+  </div>
+</div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+"use strict";
+// ===== CONFIG =====
+const CLIENT_ID = "307389080069-5674ofpgqhv9astq3184nq6nuv68e6m6.apps.googleusercontent.com";
+const SCOPES = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.events";
+const LS_KEY = "subwatch.data.v1";
+const CYCLE_DAYS = {weekly:7, monthly:30, quarterly:91, yearly:365};
+const CUR_SYM = {INR:"₹", USD:"$", EUR:"€", GBP:"£"};
+
+let accessToken = null, tokenClient = null;
+let state = load();
+
+function load(){ try{ return JSON.parse(localStorage.getItem(LS_KEY)) || {subs:[], ignored:[]}; }catch(e){ return {subs:[], ignored:[]}; } }
+function save(){ localStorage.setItem(LS_KEY, JSON.stringify(state)); }
+function status(msg, isErr){ const el=document.getElementById("status"); el.textContent=msg; el.className=isErr?"err":""; }
+function uid(){ return "s"+Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
+function fmtAmt(a,c){ return (CUR_SYM[c]||c+" ")+Number(a).toLocaleString("en-IN",{maximumFractionDigits:2}); }
+function monthlyEquiv(s){ const d=CYCLE_DAYS[s.cycle]||30; return s.amount*30/d; }
+function daysUntil(dateStr){ const t=new Date(); t.setHours(0,0,0,0); const d=new Date(dateStr+"T00:00:00"); return Math.round((d-t)/86400000); }
+function addDays(dateStr,n){ const d=new Date(dateStr+"T00:00:00"); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); }
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g, m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m])); }
+
+// ===== Google auth =====
+function ensureToken(promptMode){
+  return new Promise((resolve,reject)=>{
+    if(!window.google || !google.accounts){ reject(new Error("Google library not loaded yet. Check connection and retry.")); return; }
+    if(!tokenClient){
+      tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: CLIENT_ID,
+        scope: SCOPES,
+        callback: (resp)=>{
+          if(resp && resp.access_token){ accessToken = resp.access_token; resolve(accessToken); }
+          else reject(new Error("Google did not return a token."));
+        },
+        error_callback: (e)=>{ reject(new Error("Sign-in failed: "+(e && (e.message||e.type||e.error)||"unknown"))); }
+      });
+    }
+    try{ tokenClient.requestAccessToken({prompt: promptMode || ""}); }catch(e){ reject(e); }
+  });
+}
+async function api(path, opts){
+  opts = opts || {}; opts.headers = Object.assign({Authorization:"Bearer "+accessToken}, opts.headers||{});
+  let r = await fetch(path, opts);
+  if(r.status===401){ accessToken=null; await ensureToken(""); opts.headers.Authorization="Bearer "+accessToken; r = await fetch(path, opts); }
+  if(!r.ok){ const t = await r.text(); throw new Error("Google API error "+r.status+": "+t.slice(0,300)); }
+  return r.status===204 ? null : r.json();
+}
+
+// ===== Gmail receipt scanning =====
+const RECEIPT_Q = '(subject:receipt OR subject:invoice OR subject:"payment successful" OR subject:"payment receipt" OR subject:subscription OR subject:renewal OR subject:"auto-debit" OR subject:"order confirmation" OR subject:"your plan") newer_than:400d -category:promotions';
+const KNOWN = ["netflix","spotify","amazon","prime","youtube","google","openai","chatgpt","anthropic","microsoft","apple","icloud","adobe","canva","notion","figma","github","linkedin","hotstar","disney","zee5","sonyliv","jiocinema","jio","airtel","spotify","swiggy","zomato","uber","ola","cred","phonepe","gpay","googlepay","paytm","razorpay","x.com","twitter","medium","discord","dropbox","zoom","slack","hostinger","godaddy","namecheap","cloudflare","digitalocean","aws","vercel","heroku","shopify","grammarly","duolingo","audible","kindle","coursera","udemy","byju","unacademy","spotify","wynk","gaana","apple music","novi","cursor","perplexity","gemini","claude","midjourney","elevenlabs","runway","octafx","octa","zerodha","groww","upstox","tradingview","truecaller","spotify"];
+const AMT_RE = /(?:₹|rs\.?|inr)\s?([0-9][0-9,]*(?:\.[0-9]{1,2})?)|([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s?(?:₹|rs\.?|inr)|(?:\$|usd)\s?([0-9][0-9,]*(?:\.[0-9]{1,2})?)|([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s?(?:\$|usd)/i;
+
+function cleanName(from){
+  let n = (from||"").replace(/<[^>]*>/g,"").replace(/"/g,"").trim();
+  n = n.replace(/\s*(team|support|billing|payments|no-?reply|india|inc\.?|ltd\.?|pvt\.?)\s*/gi," ").replace(/\s+/g," ").trim();
+  return n || (from||"Unknown").split("@")[0];
+}
+function domainOf(from){ const m=(from||"").match(/@([A-Za-z0-9.-]+)/); return m?m[1].toLowerCase():""; }
+function findAmount(text){
+  if(!text) return null;
+  const m = text.match(AMT_RE);
+  if(!m) return null;
+  const inr = m[1]||m[2], usd = m[3]||m[4];
+  const val = parseFloat((inr||usd||"").replace(/,/g,""));
+  if(!isFinite(val)||val<=0||val>2000000) return null;
+  return {amount:val, currency: inr?"INR":"USD"};
+}
+function guessCycle(text){
+  const t=(text||"").toLowerCase();
+  if(/annual|yearly|12.month|1 year/.test(t)) return "yearly";
+  if(/quarterly|3.month/.test(t)) return "quarterly";
+  if(/weekly|7.day/.test(t)) return "weekly";
+  if(/monthly|per month|\/mo\b|1.month/.test(t)) return "monthly";
+  return null;
+}
+function looksRelevant(msg){
+  const f=(msg.from||"").toLowerCase(), s=(msg.subject||"").toLowerCase();
+  return KNOWN.some(k=>f.includes(k)||s.includes(k));
+}
+
+async function scanGmail(onProgress){
+  const found = {};
+  let pageToken = null, scanned = 0;
+  do{
+    const q = RECEIPT_Q + (pageToken? "&pageToken="+pageToken : "");
+    const list = await api("https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=100&q="+encodeURIComponent(RECEIPT_Q)+(pageToken?"&pageToken="+pageToken:""));
+    const ids = (list.messages||[]).map(m=>m.id);
+    for(const id of ids){
+      const meta = await api("https://gmail.googleapis.com/gmail/v1/users/me/messages/"+id+"?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date");
+      const h = {}; (meta.payload&&meta.payload.headers||[]).forEach(x=>h[x.name]=x.value);
+      const rec = {id:id, subject:h.Subject||"", from:h.From||"", date:h.Date||"", snippet:meta.snippet||""};
+      scanned++;
+      if(scanned%10===0) onProgress("Scanned "+scanned+" receipts...");
+      const dom = domainOf(rec.from);
+      if(state.ignored.includes(dom)) continue;
+      let amt = findAmount(rec.snippet) || findAmount(rec.subject);
+      let bodyText = rec.snippet;
+      if(!amt && looksRelevant(rec)){
+        try{
+          const full = await api("https://gmail.googleapis.com/gmail/v1/users/me/messages/"+id+"?format=full");
+          bodyText = extractText(full.payload).slice(0,4000);
+          amt = findAmount(bodyText);
+        }catch(e){}
+      }
+      if(!amt) continue;
+      const cycle = guessCycle(rec.subject+" "+bodyText);
+      const when = rec.date ? new Date(rec.date) : null;
+      if(!when || isNaN(when)) continue;
+      const key = dom || rec.from;
+      if(!found[key]) found[key] = {name:cleanName(rec.from), domain:dom, receipts:[], currency:amt.currency};
+      found[key].receipts.push({date:when, amount:amt.amount, cycle:cycle});
+    }
+    pageToken = list.nextPageToken;
+    if(scanned>=300) break;
+  }while(pageToken);
+
+  const out = [];
+  for(const key of Object.keys(found)){
+    const f = found[key];
+    f.receipts.sort((a,b)=>a.date-b.date);
+    const last = f.receipts[f.receipts.length-1];
+    let cycle = last.cycle;
+    if(!cycle && f.receipts.length>=2){
+      const gap = (f.receipts[f.receipts.length-1].date - f.receipts[f.receipts.length-2].date)/86400000;
+      if(gap>300) cycle="yearly"; else if(gap>75) cycle="quarterly"; else if(gap>12) cycle="monthly"; else cycle="weekly";
+    }
+    if(!cycle) cycle = "monthly";
+    const next = addDays(last.date.toISOString().slice(0,10), CYCLE_DAYS[cycle]);
+    out.push({id:uid(), source:"auto", key:key, name:f.name, amount:last.amount, currency:f.currency, cycle:cycle, nextRenewal:next, lastPaid:last.date.toISOString().slice(0,10), reminderEventId:null});
+  }
+  return out;
+}
+function extractText(payload){
+  if(!payload) return "";
+  if(payload.body && payload.body.data){ try{ return atob(payload.body.data.replace(/-/g,"+").replace(/_/g,"/")); }catch(e){ return ""; } }
+  let txt = "";
+  (payload.parts||[]).forEach(p=>{
+    if(p.mimeType==="text/plain") txt += extractText(p)+" ";
+  });
+  if(!txt) (payload.parts||[]).forEach(p=>{ if(p.mimeType==="text/html") txt += extractText(p).replace(/<[^>]+>/g," ")+" "; });
+  if(!txt) (payload.parts||[]).forEach(p=>{ txt += extractText(p)+" "; });
+  return txt;
+}
+
+// ===== Calendar reminders =====
+async function setReminder(sub){
+  const ev = {
+    summary: "Renewal: "+sub.name+" "+fmtAmt(sub.amount,sub.currency),
+    description: sub.name+" renews today ("+fmtAmt(sub.amount,sub.currency)+", "+sub.cycle+"). Set by SubWatch.",
+    start:{date:sub.nextRenewal}, end:{date:addDays(sub.nextRenewal,1)},
+    reminders:{useDefault:false, overrides:[{method:"email",minutes:3*24*60},{method:"popup",minutes:9*60}]}
+  };
+  const r = await api("https://www.googleapis.com/calendar/v3/calendars/primary/events",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(ev)});
+  return r.id;
+}
+async function clearReminder(sub){
+  if(!sub.reminderEventId) return;
+  try{ await api("https://www.googleapis.com/calendar/v3/calendars/primary/events/"+encodeURIComponent(sub.reminderEventId),{method:"DELETE"}); }catch(e){}
+  sub.reminderEventId = null;
+}
+
+// ===== UI =====
+function render(){
+  const list = document.getElementById("subList");
+  const subs = state.subs.slice().sort((a,b)=>daysUntil(a.nextRenewal)-daysUntil(b.nextRenewal));
+  let inr=0, usd=0;
+  subs.forEach(s=>{ const m=monthlyEquiv(s); if(s.currency==="INR") inr+=m; else if(s.currency==="USD") usd+=m; });
+  document.getElementById("burnInr").textContent = "₹"+Math.round(inr).toLocaleString("en-IN");
+  document.getElementById("burnUsd").textContent = "$"+usd.toFixed(2);
+  document.getElementById("burnCount").textContent = subs.length;
+  list.innerHTML = "";
+  if(!subs.length){ list.innerHTML = '<div class="note" style="margin-top:10px">No subscriptions yet. Rescan Gmail or add one manually.</div>'; return; }
+  subs.forEach(s=>{
+    const d = daysUntil(s.nextRenewal);
+    const cls = d<0?"late":(d<=7?"soon":"far");
+    const when = d<0 ? Math.abs(d)+"d overdue" : (d===0?"today":(d===1?"tomorrow":"in "+d+"d"));
+    const div = document.createElement("div");
+    div.className="subitem";
+    div.innerHTML =
+      '<div class="row"><div><span class="name">'+esc(s.name)+'</span><span class="pill '+(s.source==="auto"?"auto":"man")+'">'+(s.source==="auto"?"Gmail":"manual")+'</span></div>'+
+      '<div class="days '+cls+'">'+when+'</div></div>'+
+      '<div class="meta">'+fmtAmt(s.amount,s.currency)+' / '+s.cycle+' · next '+s.nextRenewal+(s.lastPaid?' · last paid '+s.lastPaid:'')+'</div>'+
+      '<div class="actions">'+
+        (s.reminderEventId
+          ? '<button class="btn small ghost" data-act="unremind">Reminder on ✓</button>'
+          : '<button class="btn small" data-act="remind">Remind me</button>')+
+        '<button class="btn small ghost" data-act="edit">Edit</button>'+
+        '<button class="btn small ghost" data-act="del">Remove</button>'+
+      '</div>';
+    div.querySelectorAll("button").forEach(b=>b.addEventListener("click",()=>onAction(b.dataset.act,s)));
+    list.appendChild(div);
+  });
+}
+async function onAction(act, s){
+  try{
+    if(act==="remind"){ await ensureToken(""); s.reminderEventId = await setReminder(s); save(); render(); }
+    else if(act==="unremind"){ await ensureToken(""); await clearReminder(s); save(); render(); }
+    else if(act==="del"){ if(confirm("Remove "+s.name+"?")){ await clearReminder(s).catch(()=>{}); state.subs = state.subs.filter(x=>x.id!==s.id); if(s.source==="auto"&&s.key) state.ignored.push(s.key); save(); render(); } }
+    else if(act==="edit"){ openForm(s); }
+  }catch(e){ alert(e.message); }
+}
+let editing = null;
+function openForm(s){
+  editing = s||null;
+  document.getElementById("formCard").classList.remove("hidden");
+  document.getElementById("formTitle").textContent = s?("Edit "+s.name):"Add a subscription";
+  document.getElementById("fName").value = s?s.name:"";
+  document.getElementById("fAmount").value = s?s.amount:"";
+  document.getElementById("fCurrency").value = s?s.currency:"INR";
+  document.getElementById("fCycle").value = s?s.cycle:"monthly";
+  document.getElementById("fDate").value = s?s.nextRenewal:"";
+  document.getElementById("fName").focus();
+}
+function closeForm(){ document.getElementById("formCard").classList.add("hidden"); editing=null; }
+
+document.getElementById("signinBtn").addEventListener("click", async ()=>{
+  const b=document.getElementById("signinBtn"); b.disabled=true;
+  try{
+    status("Opening Google sign-in...");
+    await ensureToken("consent");
+    document.getElementById("signinCard").querySelector(".row").style.display="none";
+    status("Signed in. Scanning Gmail for receipts (this can take a minute)...");
+    const found = await scanGmail(status);
+    const manual = state.subs.filter(s=>s.source==="manual");
+    const keptAuto = state.subs.filter(s=>s.source==="auto" && found.some(f=>f.key===s.key));
+    for(const f of found){
+      const ex = keptAuto.find(k=>k.key===f.key);
+      if(ex){ f.id=ex.id; f.reminderEventId=ex.reminderEventId; if(ex.nameOverride) f.name=ex.nameOverride; }
+    }
+    state.subs = manual.concat(found);
+    save();
+    document.getElementById("app").classList.remove("hidden");
+    status("");
+    render();
+  }catch(e){ status(e.message, true); }
+  b.disabled=false;
+});
+document.getElementById("rescanBtn").addEventListener("click", async ()=>{
+  const b=document.getElementById("rescanBtn"); b.disabled=true; b.textContent="Scanning...";
+  try{
+    await ensureToken("");
+    const found = await scanGmail(()=>{});
+    const manual = state.subs.filter(s=>s.source==="manual");
+    for(const f of found){
+      const ex = state.subs.find(k=>k.source==="auto"&&k.key===f.key);
+      if(ex){ f.id=ex.id; f.reminderEventId=ex.reminderEventId; }
+    }
+    state.subs = manual.concat(found); save(); render();
+  }catch(e){ alert(e.message); }
+  b.disabled=false; b.textContent="Rescan Gmail";
+});
+document.getElementById("signoutBtn").addEventListener("click", ()=>{
+  if(accessToken && window.google) google.accounts.oauth2.revoke(accessToken, ()=>{});
+  accessToken=null; document.getElementById("app").classList.add("hidden");
+  const sc=document.getElementById("signinCard"); sc.querySelector(".row").style.display=""; status("Signed out.");
+});
+document.getElementById("addBtn").addEventListener("click", ()=>openForm(null));
+document.getElementById("cancelBtn").addEventListener("click", closeForm);
+document.getElementById("saveBtn").addEventListener("click", ()=>{
+  const name=document.getElementById("fName").value.trim();
+  const amount=parseFloat(document.getElementById("fAmount").value);
+  const currency=document.getElementById("fCurrency").value;
+  const cycle=document.getElementById("fCycle").value;
+  const date=document.getElementById("fDate").value;
+  if(!name || !isFinite(amount) || amount<=0 || !date){ document.getElementById("formNote").textContent="Name, a positive amount and a renewal date are all required."; return; }
+  if(editing){ Object.assign(editing,{name:name,amount:amount,currency:currency,cycle:cycle,nextRenewal:date}); if(editing.source==="auto") editing.nameOverride=name; }
+  else state.subs.push({id:uid(),source:"manual",key:null,name:name,amount:amount,currency:currency,cycle:cycle,nextRenewal:date,lastPaid:null,reminderEventId:null});
+  save(); closeForm(); render();
+});
+</script>
+</body>
+</html>
